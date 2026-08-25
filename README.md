@@ -43,6 +43,14 @@ missing build machinery — no `scripts/mod/modpost`, no
 (which silently produces a module with the wrong vermagic). The
 [`install-maxio.sh`](install-maxio.sh) script works around all of this.
 
+> **Note:** the `maxio.c` patches and `install-maxio.sh` were put together
+> with AI assistance (debugging the build chain step by step, patching the
+> driver against the current kernel API), then verified working end-to-end
+> on a real TOX3 box (clean rebuild + reboot + automatic interface bring-up).
+> That said, this is a small out-of-tree kernel driver put together by one
+> user for one specific box, not a reviewed upstream submission — there may
+> be edge cases or bugs. Issues and PRs welcome.
+
 ## Requirements
 
 - A TOX3 box running devmfc/debian-on-amlogic, kernel 6.18.x
