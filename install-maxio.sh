@@ -72,27 +72,25 @@ fi
 
 echo "==> [5/6] Preparing kernel scripts (modpost, cpucap-defs.h, sysreg-defs.h)"
 # Note: `make scripts/mod/` pulls in the `prepare0` target, which then wants
-# kernel/time/timeconst.bc — not shipped in devmfc headers, and not needed
-# just to build modpost. Target modpost directly instead, and explicitly
-# generate the arm64 headers (cpucap-defs.h, sysreg-defs.h) modpost's
-# includes need, since they live under archprepare, not under modpost's own deps.
-make -C "$HDR" archheaders archprepare >/tmp/maxio-scripts-build.log 2>&1 || true
-make -C "$HDR" scripts/mod/modpost >>/tmp/maxio-scripts-build.log 2>&1 || {
-    echo "    ERROR building kernel scripts, see /tmp/maxio-scripts-build.log"
-    tail -30 /tmp/maxio-scripts-build.log
-    exit 1
-}
+# kernel/time/timeconst.bc — not shipped in devmfc headers. That's fine:
+# modpost and the arm64 generated headers are already built by the time
+# that unrelated target fails, so we tolerate the error here and verify
+# the actual artifacts we need afterwards instead.
+make -C "$HDR" scripts/mod/ >/tmp/maxio-scripts-build.log 2>&1 || true
 if [ ! -x "${HDR}/scripts/mod/modpost" ]; then
-    echo "    ERROR: modpost binary not produced"
+    echo "    ERROR: modpost binary not produced, see /tmp/maxio-scripts-build.log"
+    tail -30 /tmp/maxio-scripts-build.log
     exit 1
 fi
 if [ ! -f "${HDR}/arch/arm64/include/generated/asm/cpucap-defs.h" ]; then
-    echo "    ERROR: cpucap-defs.h not generated"
+    echo "    ERROR: cpucap-defs.h not generated, see /tmp/maxio-scripts-build.log"
+    tail -30 /tmp/maxio-scripts-build.log
     exit 1
 fi
 echo "    OK"
 
-# Re-check UTS_RELEASE, `make scripts` may have regenerated it
+# `make scripts/mod/` regenerates include/generated/utsrelease.h from
+# .config, wiping out the -meson64 suffix fix from step 2. Reapply it.
 sed -i "s/#define UTS_RELEASE \".*\"/#define UTS_RELEASE \"${KVER}\"/" "$UTSFILE"
 
 echo "==> [6/6] Building & installing maxio via DKMS"
