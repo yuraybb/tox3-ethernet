@@ -67,10 +67,7 @@ missing build machinery — no `scripts/mod/modpost`, no
 > with AI assistance (debugging the build chain step by step, patching the
 > driver against the current kernel API), then verified working end-to-end
 > on a real TOX3 box (clean rebuild + reboot + automatic interface bring-up).
-> The later hardening — error checks on every MDIO access, checksummed
-> downloads of the build tools, the recovered `.dts`, the rescue unit — was
-> also exercised on that box across several reboots and a kernel update
-> (6.18.40 → 6.18.59). That said, this is a small out-of-tree kernel driver
+> That said, this is a small out-of-tree kernel driver
 > put together by one user for one specific box, not a reviewed upstream
 > submission — there may be edge cases or bugs. Changes that alter timing
 > (RGMII delay clearing, PHY reset polling) are deliberately left out until
@@ -82,6 +79,11 @@ missing build machinery — no `scripts/mod/modpost`, no
 - The matching `linux-headers-<kernel-version>` package installed
   (download from the [devmfc releases page](https://github.com/devmfc/debian-on-amlogic/releases)
   and `dpkg -i` it before running the script)
+- **Last known to work on devmfc kernel `6.18.59-meson64`** (build `20261026`).
+  On newer images the built-in driver is normally sufficient on its own, so
+  this script and the module are likely not needed there at all — they are
+  kept as the fallback for the misreported-ID case, see
+  [Which driver binds](#which-driver-binds).
 
 ## Which driver binds
 
