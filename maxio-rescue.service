@@ -1,0 +1,13 @@
+[Unit]
+Description=Rescue out-of-tree maxio PHY driver when eth0 has no carrier at boot
+After=systemd-networkd.service
+Wants=systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=90
+ExecStart=/usr/local/sbin/maxio-rescue.sh
+
+[Install]
+WantedBy=multi-user.target

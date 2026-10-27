@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/net/phy/maxio.c
  *
@@ -21,7 +21,6 @@
 #include <linux/of.h>
 #include <linux/phy.h>
 #include <linux/timer.h>
-#include <linux/version.h>
 
 #define MAXIO_MAE0621A_PHY_ID          0x7b744411U
 
@@ -87,63 +86,66 @@ out_restore:
     return ret;
 }
 
-/* Minimal clock init sequence as per vendor driver */
+/* Minimal clock init sequence as per vendor driver.
+ * Every MDIO access is checked: a dead bus must surface as an error
+ * instead of being papered over (the old code always returned 0 and
+ * could write a negative errno back as the "page" value). */
 static int maxio_mae0621a_clk_init(struct phy_device *phydev)
 {
     u16 workmode, clkmode;
-    int oldpage;
+    int oldpage, ret;
 
     oldpage = phy_read(phydev, MAXIO_PAGE_SELECT);
-    if (oldpage == 0xFFFF) /* retry once if bus was noisy */
-        oldpage = phy_read(phydev, MAXIO_PAGE_SELECT);
+    if (oldpage < 0)
+        oldpage = phy_read(phydev, MAXIO_PAGE_SELECT); /* retry once if bus was noisy */
+    if (oldpage < 0)
+        return oldpage;
 
     /* Soft reset on default page */
-    phy_write(phydev, MAXIO_PAGE_SELECT, 0x0);
-    phy_write(phydev, MII_BMCR, BMCR_RESET | phy_read(phydev, MII_BMCR));
+    ret = phy_write(phydev, MAXIO_PAGE_SELECT, 0x0);
+    if (ret < 0)
+        goto out_restore;
+    ret = phy_read(phydev, MII_BMCR);
+    if (ret < 0)
+        goto out_restore;
+    ret = phy_write(phydev, MII_BMCR, BMCR_RESET | ret);
+    if (ret < 0)
+        goto out_restore;
 
     /* Read work mode */
-    phy_write(phydev, MAXIO_PAGE_SELECT, 0xa43);
-    workmode = phy_read(phydev, MAXIO_MAE0621A_WORK_STATUS_REG);
+    ret = phy_write(phydev, MAXIO_PAGE_SELECT, 0xa43);
+    if (ret < 0)
+        goto out_restore;
+    ret = phy_read(phydev, MAXIO_MAE0621A_WORK_STATUS_REG);
+    if (ret < 0)
+        goto out_restore;
+    workmode = ret;
 
     /* Read clock mode */
-    phy_write(phydev, MAXIO_PAGE_SELECT, 0xd92);
-    clkmode = phy_read(phydev, MAXIO_MAE0621A_CLK_MODE_REG);
+    ret = phy_write(phydev, MAXIO_PAGE_SELECT, 0xd92);
+    if (ret < 0)
+        goto out_restore;
+    ret = phy_read(phydev, MAXIO_MAE0621A_CLK_MODE_REG);
+    if (ret < 0)
+        goto out_restore;
+    clkmode = ret;
 
     /* If abnormal, toggle oscillator/crystal select bit (bit 8) */
     if ((workmode & BIT(5)) == 0) {
         if ((clkmode & BIT(8)) == 0) {
             /* oscillator: set bit 8 */
-            phy_write(phydev, MAXIO_MAE0621A_CLK_MODE_REG, clkmode | BIT(8));
+            ret = phy_write(phydev, MAXIO_MAE0621A_CLK_MODE_REG, clkmode | BIT(8));
         } else {
             /* crystal: clear bit 8 */
-            phy_write(phydev, MAXIO_MAE0621A_CLK_MODE_REG, clkmode & ~BIT(8));
+            ret = phy_write(phydev, MAXIO_MAE0621A_CLK_MODE_REG, clkmode & ~BIT(8));
         }
+        if (ret < 0)
+            goto out_restore;
     }
 
-    phy_write(phydev, MAXIO_PAGE_SELECT, oldpage);
-    return 0;
-}
+    ret = 0;
 
-/* Some builds treat warnings as errors; mark read helper maybe-unused */
-__maybe_unused
-static int maxio_read_mmd(struct phy_device *phydev, int devnum, u16 regnum)
-{
-    int ret, oldpage;
-
-    oldpage = phy_read(phydev, MAXIO_PAGE_SELECT);
-    if (oldpage < 0)
-        return oldpage;
-
-    if (devnum == MDIO_MMD_AN && regnum == MDIO_AN_EEE_ADV) {
-        phy_write(phydev, MAXIO_PAGE_SELECT, 0);
-        phy_write(phydev, MII_MMD_CTRL, MDIO_MMD_AN);
-        phy_write(phydev, MII_MMD_DATA, MDIO_AN_EEE_ADV);
-        phy_write(phydev, MII_MMD_CTRL, 0x4000 | MDIO_MMD_AN);
-        ret = phy_read(phydev, MII_MMD_DATA);
-    } else {
-        ret = -EOPNOTSUPP;
-    }
-
+out_restore:
     phy_write(phydev, MAXIO_PAGE_SELECT, oldpage);
     return ret;
 }
@@ -176,16 +178,17 @@ static int maxio_write_mmd(struct phy_device *phydev, int devnum, u16 regnum, u1
 /* PHY operations                                                            */
 /* ------------------------------------------------------------------------- */
 
-static int maxio_mae0621a_config_aneg(struct phy_device *phydev)
-{
-    return genphy_config_aneg(phydev);
-}
-
 /*
  * Accept match for:
  *  - Correct ID 0x7b744411
  *  - DT override compatible "ethernet-phy-id7b74.4411"
  *  - Broken read 0xffff4411 (PHYSID1 == 0xffff, PHYSID2 == 0x4411)
+ *
+ * Note: the shipped meson-sc2-tox3-gbit.dtb has no compatible on its
+ * ethernet-phy@0 node, so today the driver binds through the correct-ID
+ * case or the 0xffff4411 fallback - the latter is load-bearing and must
+ * not be removed before "ethernet-phy-id7b74.4411" is added to the DTB
+ * (that change needs a test on real hardware).
  *
  * Return 1 for match, 0 for no match.
  */
@@ -210,7 +213,7 @@ static int maxio_mae0621a_config_init(struct phy_device *phydev)
 {
     struct device *dev = &phydev->mdio.dev;
     u16 val;
-    int ret;
+    int ret, prev;
     struct device_node *np = phydev->mdio.dev.of_node;
 
     /* Normalize to correct ID if matched via DT override or broken read */
@@ -228,7 +231,11 @@ static int maxio_mae0621a_config_init(struct phy_device *phydev)
     if (ret < 0)
         dev_dbg(dev, "MAE0621A: auto_speed_down write failed (%d)\n", ret);
 
-    /* Adjust RGMII TX/RX delays from phy-mode */
+    /* RGMII TX/RX delays (vendor page 0xd96, reg 0x0), set from phy-mode.
+     * Only the requested bits are OR-ed in; bits already set by the strap
+     * are never cleared here, because clearing them changes timing that is
+     * known to work on TOX3 (phy-mode = "rgmii" + amlogic,tx-delay-ns) and
+     * would have to be re-validated on real hardware first. */
     switch (phydev->interface) {
     case PHY_INTERFACE_MODE_RGMII:
         val = 0x0;
@@ -246,23 +253,29 @@ static int maxio_mae0621a_config_init(struct phy_device *phydev)
         goto delay_skip;
     }
 
-    ret = maxio_read_paged(phydev, 0xd96, 0x0);
-    if (ret < 0) {
+    prev = maxio_read_paged(phydev, 0xd96, 0x0);
+    if (prev < 0) {
         dev_err(dev, "MAE0621A: failed to read RGMII delay reg\n");
-        return ret;
+        return prev;
     }
 
-    ret = maxio_write_paged(phydev, 0xd96, 0x0, (u16)(val | ret));
+    ret = maxio_write_paged(phydev, 0xd96, 0x0, (u16)(val | prev));
     if (ret < 0) {
         dev_err(dev, "MAE0621A: failed to write RGMII delay reg\n");
         return ret;
-    } else if (ret == 0) {
-        dev_dbg(dev, "MAE0621A: 2ns delays already set per strap/boot\n");
     }
+    if (val == 0)
+        dev_dbg(dev, "MAE0621A: phy-mode has no PHY-side delays, reg kept at 0x%04x\n",
+                prev);
 
 delay_skip:
     /* Reset to apply changes */
-    phy_write(phydev, MII_BMCR, BMCR_RESET | phy_read(phydev, MII_BMCR));
+    ret = phy_read(phydev, MII_BMCR);
+    if (ret < 0)
+        return ret;
+    ret = phy_write(phydev, MII_BMCR, BMCR_RESET | ret);
+    if (ret < 0)
+        return ret;
     msleep(1);
     phy_write(phydev, MAXIO_PAGE_SELECT, 0x0);
 
@@ -271,10 +284,15 @@ delay_skip:
 
 static int maxio_mae0621a_resume(struct phy_device *phydev)
 {
-    int ret = genphy_resume(phydev);
+    int ret, bmcr;
+
+    ret = genphy_resume(phydev);
 
     /* Some MACs require the PHY to provide RXCLK early; re-reset */
-    ret |= phy_write(phydev, MII_BMCR, BMCR_RESET | phy_read(phydev, MII_BMCR));
+    bmcr = phy_read(phydev, MII_BMCR);
+    if (bmcr < 0)
+        return ret < 0 ? ret : bmcr;
+    ret |= phy_write(phydev, MII_BMCR, BMCR_RESET | bmcr);
     msleep(20);
 
     return ret;
@@ -287,15 +305,11 @@ static int maxio_mae0621a_suspend(struct phy_device *phydev)
     return 0;
 }
 
-static int maxio_mae0621a_status(struct phy_device *phydev)
-{
-    return genphy_read_status(phydev);
-}
-
 static int maxio_mae0621a_probe(struct phy_device *phydev)
 {
     int ret = maxio_mae0621a_clk_init(phydev);
-    mdelay(100);
+
+    msleep(100); /* let the PHY settle after clock init; probe may sleep */
     return ret;
 }
 
@@ -312,8 +326,8 @@ static struct phy_driver maxio_nc_drvs[] = {
         .features           = PHY_GBIT_FEATURES,
         .probe              = maxio_mae0621a_probe,
         .config_init        = maxio_mae0621a_config_init,
-        .config_aneg        = maxio_mae0621a_config_aneg,
-        .read_status        = maxio_mae0621a_status,
+        .config_aneg        = genphy_config_aneg,
+        .read_status        = genphy_read_status,
         .suspend            = maxio_mae0621a_suspend,
         .resume             = maxio_mae0621a_resume,
         .match_phy_device   = maxio_mae0621a_match,

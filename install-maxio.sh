@@ -10,10 +10,32 @@
 
 set -e
 
-KVER="$(uname -r)"
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: this script must be run as root:  sudo $0"
+    exit 1
+fi
+
+# Kernel to build for: the running one by default, or pass KVER=... to
+# prepare a freshly installed kernel before rebooting into it, e.g.
+#   KVER=6.18.59-meson64 sudo -E ./install-maxio.sh
+KVER="${KVER:-$(uname -r)}"
 HDR="/usr/src/linux-headers-${KVER}"
 DRIVER_SRC="/usr/src/maxio-1.0"
 KVER_BASE="${KVER%-meson64}"   # e.g. 6.18.34
+TAG="v${KVER_BASE%.*}"         # mainline tag to fetch tools from, e.g. v6.18
+TOOLS_BASE_URL="https://raw.githubusercontent.com/torvalds/linux"
+
+# Known-good sha256 sums of the build tools, keyed by file name, valid for
+# the tag in TAG. Every run verifies the download against this table; for
+# any other tag the files are fetched but reported as unverified - check
+# them manually and add their sums here before relying on them.
+declare -A KNOWN_SHA256=()
+if [ "$TAG" = "v6.18" ]; then
+    KNOWN_SHA256[gen-cpucaps.awk]="6f1efe6815a9639dcb23ef3f85d3fd34f479ba2271952da0b12ff61dd3b70455"
+    KNOWN_SHA256[gen-sysreg.awk]="fbb28c86b1fb48e1b6e2f426b63f85f5a5584bcfb25dcf5bfa3e8cc4c03d1b0e"
+    KNOWN_SHA256[sysreg]="bfc1f33883117c857fd6d90fddcfe8a2d89c55ddb58012b0644a4800d22c9507"
+    KNOWN_SHA256[cpucaps]="fc02cff64745b49f64419d5f80489b866687e44c7800c8971ea24c2fb4375bb7"
+fi
 
 echo "==> Kernel: ${KVER}"
 echo "==> Headers dir: ${HDR}"
@@ -29,9 +51,21 @@ if [ ! -d "$DRIVER_SRC" ]; then
     exit 1
 fi
 
-echo "==> [1/6] Installing build dependencies"
-apt-get update -qq
-apt-get install -y -qq dkms build-essential curl >/dev/null
+echo "==> [1/6] Checking build dependencies"
+# Only touch apt when something is actually missing. apt refuses to do
+# anything while another package is half-configured (e.g. a linux-image
+# postinst failing on the missing modpost), and that must not block us from
+# fixing the headers below.
+MISSING=""
+for tool in dkms gcc make curl sha256sum; do
+    command -v "$tool" >/dev/null || MISSING="$MISSING $tool"
+done
+if [ -n "$MISSING" ]; then
+    apt-get update -qq
+    apt-get install -y -qq dkms build-essential curl >/dev/null
+else
+    echo "    all build tools present, apt not needed"
+fi
 
 echo "==> [2/6] Fixing UTS_RELEASE (devmfc headers ship it without -meson64)"
 UTSFILE="${HDR}/include/generated/utsrelease.h"
@@ -47,20 +81,41 @@ TOOLS="${HDR}/arch/arm64/tools"
 mkdir -p "$TOOLS"
 
 fetch_if_missing() {
-    # always (re)fetch: earlier manual attempts may have left stale/partial files
-    local dest="$1" url="$2"
-    curl -fsSL -o "$dest" "$url"
-    echo "    fetched $(basename "$dest")"
+    # Always (re)fetch: earlier manual attempts may have left stale/partial
+    # files. The download lands in a temp file and is moved into place only
+    # after the checksum check, so a failed or tampered download can never
+    # leave a half-written tool behind.
+    local dest="$1" file="$2"
+    local url="${TOOLS_BASE_URL}/${TAG}/arch/arm64/tools/${file}"
+    local tmp want got
+
+    tmp="$(mktemp)"
+    if ! curl -fsSL -m 60 -o "$tmp" "$url"; then
+        rm -f "$tmp"
+        echo "    ERROR: download failed: ${url}"
+        return 1
+    fi
+
+    want="${KNOWN_SHA256[$file]:-}"
+    if [ -n "$want" ]; then
+        got="$(sha256sum "$tmp" | cut -d' ' -f1)"
+        if [ "$got" != "$want" ]; then
+            rm -f "$tmp"
+            echo "    ERROR: sha256 mismatch for ${file}"
+            echo "        want ${want}"
+            echo "        got  ${got}"
+            return 1
+        fi
+        echo "    fetched ${file} (sha256 OK)"
+    else
+        echo "    fetched ${file} (no pinned sha256 for ${TAG} - NOT verified)"
+    fi
+    mv "$tmp" "$dest"
 }
 
-fetch_if_missing "${TOOLS}/gen-cpucaps.awk" \
-    "https://raw.githubusercontent.com/torvalds/linux/v${KVER_BASE%.*}/arch/arm64/tools/gen-cpucaps.awk"
-fetch_if_missing "${TOOLS}/gen-sysreg.awk" \
-    "https://raw.githubusercontent.com/torvalds/linux/v${KVER_BASE%.*}/arch/arm64/tools/gen-sysreg.awk"
-fetch_if_missing "${TOOLS}/sysreg" \
-    "https://raw.githubusercontent.com/torvalds/linux/v${KVER_BASE%.*}/arch/arm64/tools/sysreg"
-fetch_if_missing "${TOOLS}/cpucaps" \
-    "https://raw.githubusercontent.com/torvalds/linux/v${KVER_BASE%.*}/arch/arm64/tools/cpucaps"
+for tool in gen-cpucaps.awk gen-sysreg.awk sysreg cpucaps; do
+    fetch_if_missing "${TOOLS}/${tool}" "$tool"
+done
 
 echo "==> [4/6] Patching cpucaps with devmfc-specific workaround"
 if ! grep -q "WORKAROUND_4193714" "${TOOLS}/cpucaps"; then
@@ -76,22 +131,27 @@ echo "==> [5/6] Preparing kernel scripts (modpost, cpucap-defs.h, sysreg-defs.h)
 # modpost and the arm64 generated headers are already built by the time
 # that unrelated target fails, so we tolerate the error here and verify
 # the actual artifacts we need afterwards instead.
-make -C "$HDR" scripts/mod/ >/tmp/maxio-scripts-build.log 2>&1 || true
+# The log goes to a per-run temp file, never to a fixed world-writable
+# path that another local user could plant a symlink at.
+BUILD_LOG="$(mktemp /tmp/maxio-scripts-build.XXXXXX)"
+make -C "$HDR" scripts/mod/ >"$BUILD_LOG" 2>&1 || true
 if [ ! -x "${HDR}/scripts/mod/modpost" ]; then
-    echo "    ERROR: modpost binary not produced, see /tmp/maxio-scripts-build.log"
-    tail -30 /tmp/maxio-scripts-build.log
+    echo "    ERROR: modpost binary not produced, see ${BUILD_LOG}"
+    tail -30 "$BUILD_LOG"
     exit 1
 fi
 if [ ! -f "${HDR}/arch/arm64/include/generated/asm/cpucap-defs.h" ]; then
-    echo "    ERROR: cpucap-defs.h not generated, see /tmp/maxio-scripts-build.log"
-    tail -30 /tmp/maxio-scripts-build.log
+    echo "    ERROR: cpucap-defs.h not generated, see ${BUILD_LOG}"
+    tail -30 "$BUILD_LOG"
     exit 1
 fi
 echo "    OK"
 
 # `make scripts/mod/` regenerates include/generated/utsrelease.h from
 # .config, wiping out the -meson64 suffix fix from step 2. Reapply it.
-sed -i "s/#define UTS_RELEASE \".*\"/#define UTS_RELEASE \"${KVER}\"/" "$UTSFILE"
+if [ -f "$UTSFILE" ]; then
+    sed -i "s/#define UTS_RELEASE \".*\"/#define UTS_RELEASE \"${KVER}\"/" "$UTSFILE"
+fi
 
 echo "==> [6/6] Building & installing maxio via DKMS"
 dkms remove -m maxio -v 1.0 --all >/dev/null 2>&1 || true
@@ -104,36 +164,32 @@ if [ ! -f "$MODPATH" ]; then
     exit 1
 fi
 
-echo "==> Installing systemd service"
-cat > /etc/systemd/system/maxio-eth.service << 'EOF'
-[Unit]
-Description=Load maxio PHY driver and bring up eth0
-After=systemd-modules-load.service
-Before=network.target
+echo "==> Installing the rescue systemd unit (module loads only if eth0 has no carrier)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/maxio-rescue.sh" ] && [ -f "$SCRIPT_DIR/maxio-rescue.service" ]; then
+    install -m 0755 "$SCRIPT_DIR/maxio-rescue.sh" /usr/local/sbin/maxio-rescue.sh
+    install -m 0644 "$SCRIPT_DIR/maxio-rescue.service" /etc/systemd/system/maxio-rescue.service
+    systemctl daemon-reload
+    systemctl enable maxio-rescue.service >/dev/null
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c 'insmod /lib/modules/$(uname -r)/updates/dkms/maxio.ko || true'
-ExecStart=/bin/sh -c 'sleep 1 && ip link set eth0 down || true'
-ExecStart=/bin/sh -c 'sleep 1 && ip link set eth0 up || true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable maxio-eth.service >/dev/null
+    # devmfc's kernel has its own built-in MAE0621A driver that binds whenever
+    # the chip reports its real PHY ID, so the old unconditional loader only
+    # created a race between the two drivers. Drop it in favour of the rescue
+    # unit, which loads the out-of-tree module only when eth0 gets no carrier.
+    rm -f /etc/systemd/system/maxio-eth.service
+    systemctl disable --now maxio-eth.service >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    echo "    maxio-rescue.service enabled; maxio-eth.service removed"
+else
+    echo "    WARNING: maxio-rescue.* not found next to $0 - systemd units left unchanged"
+fi
 
 echo ""
-echo "==> Done. Loading module now for immediate effect..."
-modprobe -r maxio 2>/dev/null || true
-insmod "$MODPATH" 2>/dev/null || true
-ip link set eth0 down 2>/dev/null || true
-sleep 1
-ip link set eth0 up 2>/dev/null || true
+echo "==> Done. The module was NOT force-loaded: the built-in driver owns the"
+echo "    link, the rescue unit loads this module only as a fallback."
 
 echo ""
 echo "==> Status:"
+lsmod | grep maxio || echo "    out-of-tree module: not loaded (expected)"
 dmesg | grep -i "MAE0621A\|maxio" | tail -5
 ip addr show eth0
