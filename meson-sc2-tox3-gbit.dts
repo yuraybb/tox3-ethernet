@@ -575,6 +575,7 @@
 					#address-cells = <0x1>;
 					#size-cells = <0x0>;
 					ethernet-phy@0 {
+                        compatible = "ethernet-phy-id7b74.4411", "ethernet-phy-ieee802.3-c22";
 						max-speed = <0x3e8>;
 						reg = <0x0>;
 						reset-assert-us = <0x186a0>;
