@@ -3,6 +3,18 @@
 Fix for non-working gigabit Ethernet on **TOX3** Amlogic SC2 (S905X4-class)
 TV boxes running [devmfc/debian-on-amlogic](https://github.com/devmfc/debian-on-amlogic).
 
+> [!IMPORTANT]
+> **Update (November 2026):** the device tree has been fixed and the DTB updated.
+> `meson-sc2-tox3-gbit.dts` has been corrected and `meson-sc2-tox3-gbit.dtb` has been
+> rebuilt from it. Gigabit Ethernet is confirmed **working on a real TOX3 box**
+> (link up at 1000Mb/s, stable after reboot).
+>
+> **To get it working, you only need two files:**
+> - `meson-sc2-tox3-gbit.dtb` → `/boot/dtb-<your-kernel-version>/amlogic/`
+> - `box-tox3_gigabit.config` → `/boot/box-config/`
+>
+> Then set `box=tox3_gigabit` in `/boot/boot.config` and reboot.
+
 ## The problem
 
 TOX3 boxes are recognized by devmfc as `vontar,x4` and boot using
@@ -107,6 +119,10 @@ and bounces `eth0` so the PHY is re-probed. It prints `eth0 carrier present -
 built-in MAE0621A driver is working` and exits when nothing is wrong.
 
 ## Install
+
+> [!NOTE]
+> **Outdated.** This section is no longer needed: the fixed DTB alone is enough.
+> Kept for reference only.
 
 ```bash
 # 1. Install matching kernel headers (skip if already installed)
